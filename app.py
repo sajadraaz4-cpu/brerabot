@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, date
 
 from flask import Flask, render_template, Response, session, request, redirect, url_for
+from flask_cors import CORS
 
 # ---------------------------------------------------------------------------
 # Gemini (google-genai) — importazione sicura
@@ -46,6 +47,7 @@ logger = logging.getLogger("investbot")
 # Flask
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
+CORS(app)  # Abilita CORS per tutte le rotte
 app.secret_key = os.environ.get("SECRET_KEY", "brera_bot_s3cr3t_k3y_2026_xK9mQ")
 
 # PIN di accesso (solo tu puoi usare il bot)
@@ -391,15 +393,47 @@ def generate_gemini_comment(stock: dict, score: float):
 # ---------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    # Se già loggato (server-side), vai alla dashboard
+    # Bypass se ?force=1 (per recupero loop redirect client-side)
+    if session.get("logged_in") and not request.args.get("force"):
+        return redirect(url_for("index"))
+
     error = None
     if request.method == "POST":
-        pin = request.form.get("pin", "")
-        if pin == APP_PIN:
+        # Supporta sia form-data che JSON
+        # Rileva se il client vuole JSON (AJAX fetch)
+        accept_header = request.headers.get("Accept", "")
+        content_type = request.headers.get("Content-Type", "")
+        wants_json = request.is_json or "json" in accept_header or "json" in content_type
+        
+        pin = ""
+        try:
+            if request.is_json:
+                data = request.get_json()
+                pin = str(data.get("pin", "")).strip()
+            else:
+                pin = str(request.form.get("pin", "")).strip()
+        except:
+            pin = "" # Fallback on error
+
+        if pin == APP_PIN.strip():
             session["logged_in"] = True
+            # Se è JSON (dal frontend JS) o richiesto, ritorna JSON
+            if wants_json:
+                return {"success": True}
             return redirect(url_for("index"))
         else:
             error = "PIN errato. Riprova."
+            if wants_json:
+                return {"success": False, "error": error}, 401
+
     return render_template("login.html", error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 @app.route("/")
@@ -407,6 +441,13 @@ def index():
     if not session.get("logged_in"):
         return redirect(url_for("login"))
     return render_template("index.html")
+
+
+@app.route("/about")
+def about():
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    return render_template("about.html")
 
 
 @app.route("/api/analyze")
@@ -548,9 +589,11 @@ def analyze():
             logger.info("Contatore API aggiornato: %d/%d", usage["count"], API_DAILY_LIMIT)
 
         except requests.exceptions.RequestException as e:
-            msg = f"✖ ERRORE nella chiamata API: {e}"
+            import re
+            safe_msg = re.sub(r'apikey=[^&\s]+', 'apikey=***HIDDEN_KEY***', str(e))
+            msg = f"✖ ERRORE: {safe_msg}"
             yield sse_event({"type": "error", "message": msg})
-            logger.error("Errore API: %s", e)
+            logger.error("Errore API: %s", e)  # log completo (server-side only)
             save_api_usage(usage)  # salva comunque il contatore
             yield sse_event({"type": "complete", "message": "Analisi interrotta per errore di rete."})
             return
