@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+risultati/
+api_usage.json
+app.log
+*.log
+.venv/
+venv/
