@@ -7,7 +7,6 @@ import logging
 from datetime import datetime, date
 
 from flask import Flask, render_template, Response, session, request, redirect, url_for
-from flask_cors import CORS
 
 # ---------------------------------------------------------------------------
 # Gemini (google-genai) — importazione sicura
@@ -47,8 +46,8 @@ logger = logging.getLogger("investbot")
 # Flask
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
-CORS(app)  # Abilita CORS per tutte le rotte
-app.secret_key = os.environ.get("SECRET_KEY", "brera_bot_s3cr3t_k3y_2026_xK9mQ")
+# CORS rimosso per pulizia deploy Render
+app.secret_key = os.environ.get("SECRET_KEY", "brera_bot_s3cr3t")
 
 # PIN di accesso (solo tu puoi usare il bot)
 APP_PIN = os.environ.get("APP_PIN", "2026")
@@ -777,4 +776,4 @@ def analyze():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Server Flask avviato su porta %d.", port)
-    app.run(host="0.0.0.0", port=port, debug=True, threaded=True)
+    app.run(host="0.0.0.0", port=port)
