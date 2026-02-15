@@ -12,6 +12,10 @@
             font-family: 'Inter', sans-serif;
         }
     </style>
+    <script>
+        // GUARD: Se già loggato (client-side), vai alla dashboard
+        if (localStorage.getItem("auth")) window.location.href = "/";
+    </script>
 </head>
 
 <body class="bg-slate-900 text-white min-h-screen flex items-center justify-center overflow-hidden relative">
@@ -39,7 +43,7 @@
             </div>
 
             <!-- Form -->
-            <form method="POST" class="space-y-4">
+            <form onsubmit="doLogin(event)" class="space-y-4">
                 <div>
                     <input type="password" name="pin" placeholder="● ● ● ●" maxlength="8" required autofocus
                         inputmode="numeric" class="w-full bg-slate-900/60 border border-slate-600/50 text-white text-center text-2xl tracking-[0.5em]
@@ -59,12 +63,12 @@
                 </button>
             </form>
 
-            <!-- Error Message -->
-            {% if error %}
-            <div class="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-center">
-                <p class="text-red-400 text-sm font-medium">⚠ {{ error }}</p>
+            <!-- Error Message (JS Toggle) -->
+            <div id="js-error" class="hidden bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-center">
+                <p class="text-red-400 text-sm font-medium">Errore sconosciuto</p>
+                <div class="text-red-300 text-xs mt-2 font-mono text-left bg-black/20 p-2 rounded overflow-x-auto"
+                    id="js-error-detail"></div>
             </div>
-            {% endif %}
 
             <!-- Footer -->
             <p class="text-center text-xs text-slate-500 pt-2">
@@ -73,6 +77,69 @@
         </div>
     </div>
 
+    <script>
+        async function doLogin(event) {
+            event.preventDefault();
+            const form = event.target;
+            const pin = form.pin.value;
+            const btn = form.querySelector('button');
+            const errBox = document.getElementById('js-error');
+            const errDetail = document.getElementById('js-error-detail');
+
+            // Reset UI
+            errBox.classList.add('hidden');
+            errDetail.innerHTML = "";
+            const originalText = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Verifica...';
+
+            try {
+                const r = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ pin })
+                });
+
+                // Leggi testo UNA volta sola
+                const rawText = await r.text();
+
+                if (!r.ok && r.status !== 401) {
+                    throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+                }
+
+                let d;
+                try {
+                    d = JSON.parse(rawText);
+                } catch (e) {
+                    // Safe Encode HTML for display
+                    const snippet = rawText.substring(0, 300)
+                        .replace(/&/g, "&amp;")
+                        .replace(/</g, "&lt;")
+                        .replace(/>/g, "&gt;");
+
+                    console.error("Non-JSON:", rawText);
+                    throw new Error(`Ricevuto HTML invece di JSON:<br><br>${snippet}...`);
+                }
+
+                if (d.success) {
+                    localStorage.setItem("auth", "1");
+                    window.location.href = "/";
+                } else {
+                    errBox.classList.remove('hidden');
+                    errBox.querySelector('p').innerText = "⚠ " + (d.error || "Pin Errato.");
+                    btn.disabled = false;
+                    btn.innerHTML = originalText;
+                }
+            } catch (e) {
+                console.error(e);
+                errBox.classList.remove('hidden');
+                errBox.querySelector('p').innerText = "⚠ Errore:";
+                errDetail.innerHTML = e.message;
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+            }
+        }
+    </script>
 </body>
 
 </html>
