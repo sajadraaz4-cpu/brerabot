@@ -29,7 +29,7 @@ USAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_usage
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "risultati")
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AIzaSyDFoSfVDDSK4uTaMuyiTs6TLOHy9iV-Ds0"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -291,13 +291,18 @@ def save_results_csv(stocks: list[dict], scores: list[float]) -> str:
 # ---------------------------------------------------------------------------
 def generate_gemini_comment(stock: dict, score: float):
     """
-    Genera un commento in stile Guido Maria Brera usando Gemini 2.0 Flash.
+    Genera un commento in stile Guido Maria Brera usando Gemini.
     Analizza il titolo attraverso i filtri del debasement monetario,
     trophy assets, approccio contrarian e protezione del capitale.
-    Ritorna il testo oppure None in caso di errore.
+    Ritorna il testo, un messaggio di errore leggibile, oppure None.
     """
     if not GEMINI_AVAILABLE:
+        logger.error("Gemini SDK non installato (google-genai mancante).")
         return None
+
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY non configurata.")
+        return "⚠ Errore: Chiave API Gemini mancante nel server."
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
@@ -335,25 +340,22 @@ def generate_gemini_comment(stock: dict, score: float):
         for attempt in range(3):
             try:
                 response = client.models.generate_content(
-                    model="gemini-1.5-pro",
+                    model="gemini-2.5-flash",
                     contents=prompt,
                 )
                 return response.text.strip() if response and response.text else None
-            except genai.errors.ClientError as e:
-                # Catch 429/Quota specific errors
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                     if attempt < 2:
                         time.sleep(2 * (attempt + 1))  # backoff: 2s, 4s
                         continue
-                    logger.warning("Gemini Quota Esaurita dopo 3 tentativi: %s", e)
-                    return "⚠ [Quota AI Esaurita] — Riprova più tardi (15 req/min limit)."
-                logger.error("Errore Gemini Client: %s", e)
+                    logger.error("Gemini Quota Esaurita dopo 3 tentativi: %s", e)
+                    return "⚠ [Quota AI Esaurita] — Riprova più tardi."
+                logger.error("Errore Gemini (tentativo %d): %s", attempt + 1, e)
                 return None
-            except Exception:
-                # Other exceptions in loop -> continue or break? Usually break for non-transient
-                raise
     except Exception as e:
-        logger.error("Errore Generico Gemini: %s", e)
+        logger.error("Errore Gemini: %s", e)
         return None
 
 
@@ -441,21 +443,12 @@ def analyze():
         usage = load_api_usage()
         used = usage["count"]
         remaining = API_DAILY_LIMIT - used
-        yield sse_event({
-            "type": "info",
-            "message": f"[+] API Usage oggi: {used}/{API_DAILY_LIMIT} chiamate utilizzate"
-        })
-        time.sleep(0.3)
 
         if remaining <= 0:
-            msg = f"✖ ERRORE: Limite API raggiunto ({API_DAILY_LIMIT}/{API_DAILY_LIMIT}). Riprova domani."
-            yield sse_event({"type": "error", "message": msg})
+            yield sse_event({"type": "error", "message": "✖ ERRORE: Limite API raggiunto. Riprova più tardi."})
             logger.warning("Limite API raggiunto: %d/%d", used, API_DAILY_LIMIT)
             yield sse_event({"type": "complete", "message": "Analisi interrotta."})
             return
-
-        yield sse_event({"type": "success", "message": f"  ↳ {remaining} chiamate rimanenti [OK]"})
-        time.sleep(0.5)
 
         # --- Step 2: Connessione modello logico ---
         yield sse_event({"type": "info", "message": "> Connessione al modello logico..."})
@@ -469,8 +462,7 @@ def analyze():
 
         # Verifica che bastino almeno 3 chiamate
         if remaining < 3:
-            msg = f"✖ ERRORE: Servono almeno 3 chiamate API, ne restano {remaining}."
-            yield sse_event({"type": "error", "message": msg})
+            yield sse_event({"type": "error", "message": "✖ ERRORE: Limite API raggiunto. Riprova più tardi."})
             yield sse_event({"type": "complete", "message": "Analisi interrotta."})
             return
 
@@ -635,14 +627,10 @@ def analyze():
                 "message": "  ↳ Tutti gli asset analizzati sono ETF, fondi, in perdita o senza fondamentali."
             })
 
-            # Salva CSV comunque (con tutti gli score a 0)
+            # Salva CSV comunque (silenzioso)
             all_stocks_for_csv = [s for s, _ in scored]
             all_scores_for_csv = [sc for _, sc in scored]
-            csv_path = save_results_csv(all_stocks_for_csv, all_scores_for_csv)
-            yield sse_event({
-                "type": "info",
-                "message": f"  💾 CSV salvato: {os.path.basename(csv_path)}"
-            })
+            save_results_csv(all_stocks_for_csv, all_scores_for_csv)
 
             yield sse_event({
                 "type": "complete",
@@ -732,16 +720,8 @@ def analyze():
                 })
                 time.sleep(0.3)
 
-        # --- Step 7: Salvataggio CSV ---
-        yield sse_event({"type": "info", "message": "> Salvataggio risultati su CSV..."})
-        time.sleep(0.3)
-
-        csv_name = save_results_csv(all_stocks_for_csv, all_scores_for_csv)
-        yield sse_event({
-            "type": "success",
-            "message": f"  ↳ File salvato: risultati/{csv_name} [OK]"
-        })
-        time.sleep(0.3)
+        # --- Step 7: Salvataggio CSV (silenzioso) ---
+        save_results_csv(all_stocks_for_csv, all_scores_for_csv)
 
         # --- Done ---
         yield sse_event({
