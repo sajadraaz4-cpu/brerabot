@@ -6,7 +6,7 @@ import time
 import logging
 from datetime import datetime, date
 
-from flask import Flask, render_template, Response, session, request, redirect, url_for
+from flask import Flask, render_template, Response, session, request, redirect, url_for, g
 
 # ---------------------------------------------------------------------------
 # Gemini (google-genai) — importazione sicura
@@ -20,7 +20,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Configurazione
 # ---------------------------------------------------------------------------
-FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
+FMP_API_KEY = os.environ.get("FMP_API_KEY") or "oHnTMsp1Y3R0pg3JtcHSzmP6Bf1xiJN1"
 FMP_ACTIVES_URL = "https://financialmodelingprep.com/stable/most-actives"
 FMP_GAINERS_URL = "https://financialmodelingprep.com/stable/biggest-gainers"
 FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
@@ -107,106 +107,123 @@ _TROPHY_ASSETS_WHITELIST = {
     "GBTC",  # Grayscale Bitcoin Trust
 }
 
-# Punteggio fisso per Trophy Assets (bypassano i filtri)
-_TROPHY_SCORE = 85.0
+
 
 
 def compute_ai_score(stock: dict) -> float:
     """
-    Value‑Investing × Metodo Brera Score (0–100).
+    Dynamic Value‑Investing × Metodo Brera Score (0–100).
 
     Filosofia:
-      Guido Maria Brera — Debasement, Trophy Assets, Contrarian, "Prima non perdere".
+      Guido Maria Brera — Debasement, Trophy Assets, Contrarian,
+      "Prima non perdere".
 
-    Flusso:
-      0. Trophy Asset?  → bypass filtri, score fisso 85.0
-      1. Hard Block 1   → Anti‑Spazzatura (ETF / Fondi / Leva)
-      2. Hard Block 2   → Fondamentali obbligatori (P/E + EPS > 0)
-      3. Punteggio pesato:
-           • P/E ratio        → max 40 pt  (sweet spot 10–25)
-           • EPS              → max 25 pt  (utile per azione, log scale)
-           • Dividendi        → max 15 pt  (rendimento cedolare)
-           • Momentum         → max  5 pt  (residuale)
-      4. Modificatori Brera:
-           • Beta Risk        → +10 / -15 pt  ("Prima non perdere")
-           • Contrarian Pen.  → -20 pt se balzo > 15% ("Evita le mode")
+    Nessun Hard Block: il punteggio parte da 0 e cresce in modo fluido.
+    Le metriche mancanti semplicemente non contribuiscono.
+
+    Componenti:
+      • Trophy Asset bonus      → +60 pt
+      • P/E ratio (10–25)       → fino a +25 pt
+      • EPS > 0                 → fino a +15 pt
+      • Momentum (curva)        → da -20 a +20 pt
+      • Beta (stabilità)        → da -10 a +10 pt
+      • Dividendi               → fino a +10 pt
     """
 
-    name = str(stock.get("name") or "").strip()
     symbol = str(stock.get("symbol") or "").strip().upper()
 
+    score = 0.0
+
     # ================================================================
-    # STEP 0 — Trophy Assets (Bypass Hard Blocks)
+    # TROPHY ASSET BONUS (+60)
     # ================================================================
     if symbol in _TROPHY_ASSETS_WHITELIST:
-        # Oro, Argento, Bitcoin: scudi anti-debasement.
-        # Non hanno P/E né EPS → score fisso alto.
-        return _TROPHY_SCORE
+        score += 60.0
 
     # ================================================================
-    # HARD BLOCK 1 — Filtro Anti‑Spazzatura
+    # METRICHE FONDAMENTALI (solo se presenti)
     # ================================================================
-    if not name or name.upper() == "N/A":
-        return 0.0
 
-    name_lower = name.lower()
-    for kw in _JUNK_KEYWORDS:
-        if kw in name_lower:
-            return 0.0
-
-    sym_lower = symbol.lower()
-    for kw in ("3x", "2x", "-1x"):
-        if kw in sym_lower:
-            return 0.0
-
-    # ================================================================
-    # HARD BLOCK 2 — Fondamentali Obbligatori
-    # ================================================================
+    # --- P/E component (max +25 pt) ---
     pe_raw = stock.get("peRatio")
-    eps_raw = stock.get("eps")
-
     try:
         pe = float(pe_raw)
     except (ValueError, TypeError):
         pe = None
 
+    if pe is not None and 0 < pe <= 25:
+        # Sweet‑spot 10–25 → punteggio pieno proporzionale
+        if pe >= 10:
+            # Perfetto a 17, scala lineare verso i bordi
+            distance = abs(pe - 17.0)
+            score += max(15.0, 25.0 - distance * 1.0)
+        else:
+            # P/E < 10: potenzialmente deep‑value, ma meno affidabile
+            score += max(5.0, 15.0 - (10.0 - pe) * 1.5)
+    # pe > 25 o assente: 0 punti, nessuna penalizzazione
+
+    # --- EPS component (max +15 pt) ---
+    eps_raw = stock.get("eps")
     try:
         eps = float(eps_raw)
     except (ValueError, TypeError):
         eps = None
 
-    if pe is None or eps is None:
-        return 0.0
-
-    if eps <= 0:
-        return 0.0
-
-    if pe <= 0:
-        return 0.0
+    if eps is not None and eps > 0:
+        eps_pts = math.log1p(eps) * 5.0
+        score += min(15.0, eps_pts)
 
     # ================================================================
-    # PUNTEGGIO BASE — Fondamentali (max 85 pt)
+    # METRICHE DI MERCATO (per tutti)
     # ================================================================
-    score = 0.0
 
-    # --- P/E component (max 40 pt) ---
-    if 10 <= pe <= 25:
-        distance = abs(pe - 17)
-        score += max(32.0, 40.0 - distance * 0.7)
-    elif pe < 10:
-        score += max(15.0, 28.0 - (10.0 - pe) * 2.0)
-    elif pe <= 35:
-        score += max(8.0, 30.0 - (pe - 25.0) * 2.2)
-    elif pe <= 60:
-        score += max(2.0, 8.0 - (pe - 35.0) * 0.25)
+    # --- Momentum component (da -20 a +20 pt) ---
+    change_pct_raw = stock.get("changesPercentage") or 0
+    try:
+        change_pct = float(change_pct_raw)
+    except (ValueError, TypeError):
+        change_pct = 0.0
+
+    if change_pct < -3.0:
+        # Ribasso pesante → penalizza (fino a -20 per crolli)
+        score += max(-20.0, change_pct * 2.0)
+    elif -3.0 <= change_pct < 0.0:
+        # Leggero ribasso → neutro / lieve negativo
+        score += change_pct * 1.0
+    elif 0.0 <= change_pct <= 2.0:
+        # Crescita modesta → lieve bonus
+        score += change_pct * 3.0
+    elif 2.0 < change_pct <= 8.0:
+        # Crescita sana → bonus pieno (picco a ~8%)
+        score += 6.0 + (change_pct - 2.0) * 2.3333
+        score = score  # max ≈ 20 pt a 8%
+    elif 8.0 < change_pct <= 15.0:
+        # Crescita alta → bonus che decresce
+        score += max(5.0, 20.0 - (change_pct - 8.0) * 2.14)
     else:
-        score += 1.0
+        # Balzo speculativo > +15% → penalizza
+        score -= min(20.0, (change_pct - 15.0) * 3.0)
 
-    # --- EPS component (max 25 pt) ---
-    eps_score = math.log1p(eps) * 7.0
-    score += min(25.0, eps_score)
+    # --- Beta component (da -10 a +10 pt) ---
+    beta_raw = stock.get("beta")
+    try:
+        beta = float(beta_raw)
+    except (ValueError, TypeError):
+        beta = None
 
-    # --- Dividend yield component (max 15 pt) ---
+    if beta is not None:
+        if 0.5 <= beta <= 1.2:
+            score += 10.0
+        elif beta < 0.5:
+            score += 5.0  # ultra-difensivo, piccolo bonus
+        elif 1.2 < beta <= 1.5:
+            score += 3.0  # neutro-lieve
+        elif 1.5 < beta <= 1.8:
+            score -= 3.0  # volatile
+        else:  # beta > 1.8
+            score -= 10.0  # istericamente volatile
+
+    # --- Dividendi component (max +10 pt) ---
     div_yield = stock.get("dividendYield")
     if div_yield is None:
         last_div = stock.get("lastDiv")
@@ -225,59 +242,12 @@ def compute_ai_score(stock: dict) -> float:
 
     if div_yield > 0:
         if div_yield <= 5.0:
-            score += div_yield * 3.0
+            score += div_yield * 2.0  # max 10 pt a 5%
         else:
-            score += max(10.0, 15.0 - (div_yield - 5.0) * 0.5)
+            # Yield eccessivo → cap a 10, leggero declino
+            score += max(6.0, 10.0 - (div_yield - 5.0) * 0.5)
 
-    # --- Momentum component (max 5 pt) --- residuale
-    price = stock.get("price") or 0
-    change_pct = stock.get("changesPercentage") or 0
-    try:
-        price = float(price)
-        change_pct = float(change_pct)
-    except (ValueError, TypeError):
-        price, change_pct = 0.0, 0.0
-
-    if price > 0:
-        raw_momentum = abs(change_pct) * price
-        score += min(5.0, raw_momentum / 40.0)
-
-    # ================================================================
-    # MODIFICATORI BRERA
-    # ================================================================
-
-    # --- Beta / Volatilità ("Prima non perdere") ---
-    beta_raw = stock.get("beta")
-    try:
-        beta = float(beta_raw)
-    except (ValueError, TypeError):
-        beta = None
-
-    if beta is not None:
-        if 0.5 <= beta <= 1.2:
-            # Bassa volatilità → premio stabilità
-            score += 10.0
-        elif 1.2 < beta <= 1.5:
-            # Neutro — né premio né penalità
-            pass
-        elif 1.5 < beta <= 1.8:
-            # Volatile — leggera penalità
-            score -= 5.0
-        elif beta > 1.8:
-            # Istericamente volatile — penalità severa (Brera: "stanne alla larga")
-            score -= 15.0
-        elif beta < 0.5:
-            # Troppo difensivo — potrebbe essere un settore morto
-            score += 3.0
-
-    # --- Penalità Contrarian (Metodo Brera) ---
-    # Balzo giornaliero estremo = "moda del momento" → penalizza
-    if abs(change_pct) > 15.0:
-        score -= 20.0
-    elif abs(change_pct) > 10.0:
-        score -= 8.0
-
-    return round(min(100.0, max(0.0, score)), 1)
+    return round(max(0.0, min(100.0, score)), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +506,19 @@ def analyze():
             yield sse_event({"type": "info", "message": "  [3/3] Fetching Fundamental Data (P/E, EPS, Dividends)..."})
             time.sleep(0.3)
 
+            # Pre-filter: rimuovi spazzatura (ETF/fondi/leva) MA preserva Trophy Assets
+            def _is_junk(s):
+                sym = str(s.get("symbol") or "").strip().upper()
+                if sym in _TROPHY_ASSETS_WHITELIST:
+                    return False
+                nm = str(s.get("name") or "").lower()
+                for kw in _JUNK_KEYWORDS:
+                    if kw in nm or kw in sym.lower():
+                        return True
+                return False
+
+            stocks = [s for s in stocks if not _is_junk(s)]
+
             # Pre-sort by raw momentum to pick only top 20 candidates
             stocks.sort(
                 key=lambda s: abs(s.get("changesPercentage", 0) or 0) * (s.get("price", 0) or 0),
@@ -701,6 +684,7 @@ def analyze():
             time.sleep(0.35)
 
         yield sse_event({"type": "info", "message": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"})
+        yield sse_event({"href": "#", "title": "View Chart", "type": "link"})
         time.sleep(0.3)
 
         # --- Step 5b: Invio dati per il grafico ---
@@ -775,5 +759,7 @@ def analyze():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    # Flask Cors è disabilitato se rimosso, altrimenti gestire con CORS(app).
+    # Qui manteniamo la versione pulita come da richiesta utente.
     logger.info("Server Flask avviato su porta %d.", port)
     app.run(host="0.0.0.0", port=port)
