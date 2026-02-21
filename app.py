@@ -2,10 +2,12 @@ import math
 import json
 import csv
 import os
+import re
 import time
 import logging
 from datetime import datetime, date
 
+import requests
 from flask import Flask, render_template, Response, session, request, redirect, url_for, g
 
 # ---------------------------------------------------------------------------
@@ -20,7 +22,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Configurazione
 # ---------------------------------------------------------------------------
-FMP_API_KEY = os.environ.get("FMP_API_KEY") or "oHnTMsp1Y3R0pg3JtcHSzmP6Bf1xiJN1"
+FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
 FMP_ACTIVES_URL = "https://financialmodelingprep.com/stable/most-actives"
 FMP_GAINERS_URL = "https://financialmodelingprep.com/stable/biggest-gainers"
 FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
@@ -29,7 +31,7 @@ USAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_usage
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "risultati")
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AIzaSyDFoSfVDDSK4uTaMuyiTs6TLOHy9iV-Ds0"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -520,29 +522,33 @@ def analyze():
 
             profile_map = {}
             profile_api_calls = 0
-            for sym in top_symbols:
-                if usage["count"] + profile_api_calls >= API_DAILY_LIMIT:
-                    break  # non superare il limite giornaliero
+            if top_symbols and usage["count"] < API_DAILY_LIMIT:
+                symbols_str = ",".join(top_symbols)
                 try:
                     resp3 = requests.get(
                         FMP_PROFILE_URL,
-                        params={"symbol": sym, "apikey": FMP_API_KEY},
-                        timeout=10,
+                        params={"symbol": symbols_str, "apikey": FMP_API_KEY},
+                        timeout=15,
                     )
                     resp3.raise_for_status()
                     prof_data = resp3.json()
                     profile_api_calls += 1
-                    if isinstance(prof_data, list) and len(prof_data) > 0:
-                        profile_map[sym] = prof_data[0]
+                    # La risposta può essere una lista o un singolo dict
+                    if isinstance(prof_data, list):
+                        for p in prof_data:
+                            s = p.get("symbol")
+                            if s:
+                                profile_map[s] = p
                     elif isinstance(prof_data, dict) and prof_data.get("symbol"):
-                        profile_map[sym] = prof_data
-                except Exception:
-                    profile_api_calls += 1  # conta anche i tentativi falliti
+                        profile_map[prof_data["symbol"]] = prof_data
+                except Exception as e:
+                    profile_api_calls += 1  # conta anche il tentativo fallito
+                    logger.error("Errore batch profiles: %s", e)
             usage["count"] += profile_api_calls
 
             yield sse_event({
                 "type": "info",
-                "message": f"  ↳ Profili scaricati: {len(profile_map)}/{len(top_symbols)} ({profile_api_calls} API calls)"
+                "message": f"  ↳ Profili scaricati: {len(profile_map)}/{len(top_symbols)} ({profile_api_calls} API call)"
             })
 
             # Arricchisci stocks con fondamentali
@@ -563,7 +569,6 @@ def analyze():
             logger.info("Contatore API aggiornato: %d/%d", usage["count"], API_DAILY_LIMIT)
 
         except requests.exceptions.RequestException as e:
-            import re
             safe_msg = re.sub(r'apikey=[^&\s]+', 'apikey=***HIDDEN_KEY***', str(e))
             msg = f"✖ ERRORE: {safe_msg}"
             yield sse_event({"type": "error", "message": msg})
