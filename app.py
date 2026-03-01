@@ -3,7 +3,7 @@ import json
 import csv
 import os
 import re
-import 
+import time
 import logging
 from datetime import datetime, date
 
@@ -407,11 +407,6 @@ def analyze():
         yield sse_event({"type": "info", "message": "> Scaricamento dati di mercato (NASDAQ, NYSE)..."})
         time.sleep(0.4)
 
-        if remaining < 12: # Assicuriamoci di avere margine per actives + gainers + 10 profili
-            yield sse_event({"type": "error", "message": "✖ ERRORE: Limite API insufficiente. Riprova più tardi."})
-            yield sse_event({"type": "complete", "message": "Analisi interrotta."})
-            return
-
         stocks = []
         try:
             # --- Endpoint 1: Most Actives ---
@@ -438,8 +433,8 @@ def analyze():
                     seen.add(sym)
                     stocks.append(s)
 
-            # --- Endpoint 3: Profili Singoli ---
-            yield sse_event({"type": "info", "message": "  [3/3] Fetching Fundamental Data (Singole Chiamate)..."})
+            # --- Endpoint 3: Profili Singoli per TUTTE le aziende (ghigliottina sui dati mancanti) ---
+            yield sse_event({"type": "info", "message": "  [3/3] Fetching Fundamental Data (Tutte le aziende in lista)..."})
             time.sleep(0.3)
 
             def _is_junk(s):
@@ -452,24 +447,28 @@ def analyze():
                         return True
                 return False
 
+            # Eliminiamo fondi e ETF
             stocks = [s for s in stocks if not _is_junk(s)]
 
-            # Seleziona SOLO i TOP 10 per risparmiare API calls
+            # Ordinamento logico (opzionale) ma non tagliamo la lista
             stocks.sort(
                 key=lambda s: abs(s.get("changesPercentage", 0) or 0) * (s.get("price", 0) or 0),
                 reverse=True,
             )
-            top_symbols = [s.get("symbol") for s in stocks[:10] if s.get("symbol")]
+            
+            # Qui selezioniamo TUTTI i simboli, non solo i primi 10
+            all_symbols = [s.get("symbol") for s in stocks if s.get("symbol")]
 
             profile_map = {}
             profile_api_calls = 0
 
-            if top_symbols:
-                yield sse_event({"type": "info", "message": f"  ↳ Inizio fetch individuale per {len(top_symbols)} asset..."})
+            if all_symbols:
+                yield sse_event({"type": "info", "message": f"  ↳ Inizio fetch per {len(all_symbols)} asset. (Potrebbe richiedere tempo)..."})
 
-            for sym in top_symbols:
+            for sym in all_symbols:
+                # Controlliamo di non sforare il limite assoluto API
                 if (usage["count"] + profile_api_calls) >= API_DAILY_LIMIT:
-                    yield sse_event({"type": "warning", "message": "⚠ Limite API raggiunto durante lo scaricamento dei profili."})
+                    yield sse_event({"type": "warning", "message": "⚠ Limite API raggiunto. Scartiamo le aziende rimanenti."})
                     break
                 
                 try:
@@ -494,25 +493,43 @@ def analyze():
 
             yield sse_event({
                 "type": "info",
-                "message": f"  ↳ Profili integrati: {len(profile_map)}/{len(top_symbols)} ({profile_api_calls} API call usate)"
+                "message": f"  ↳ Profili integrati: {len(profile_map)}/{len(all_symbols)} ({profile_api_calls} API call usate)"
             })
 
-            # Arricchisci stocks coi fondamentali (eliminiamo chi non ha profilo)
+            # ------------------------------------------------------------------
+            # FILTRO TASSATIVO: Scartiamo chi non ha dati di bilancio completi
+            # ------------------------------------------------------------------
             final_stocks = []
             for stock in stocks:
                 sym = stock.get("symbol", "")
                 if sym in profile_map:
                     prof = profile_map[sym]
-                    stock["peRatio"] = prof.get("peRatio")
-                    stock["eps"] = prof.get("eps")
-                    stock["lastDiv"] = prof.get("lastDiv")
-                    stock["dividendYield"] = prof.get("dividendYield")
-                    stock["beta"] = prof.get("beta")
-                    final_stocks.append(stock)
+                    
+                    # Dati chiave per l'analisi
+                    pe = prof.get("peRatio")
+                    eps = prof.get("eps")
+                    beta = prof.get("beta")
+
+                    # L'azienda passa SOLO se PE, EPS e BETA esistono (non sono None)
+                    if pe is not None and eps is not None and beta is not None:
+                        stock["peRatio"] = pe
+                        stock["eps"] = eps
+                        stock["lastDiv"] = prof.get("lastDiv")
+                        stock["dividendYield"] = prof.get("dividendYield")
+                        stock["beta"] = beta
+                        final_stocks.append(stock)
             
+            # Aggiorniamo la lista stocks con solo i "sopravvissuti" al filtro tassativo
+            scartati = len(stocks) - len(final_stocks)
             stocks = final_stocks
 
             save_api_usage(usage)
+
+            yield sse_event({
+                "type": "warning",
+                "message": f"  ↳ GHIGLIOTTINA: {scartati} aziende eliminate perché prive di dati di bilancio completi."
+            })
+            time.sleep(0.5)
 
         except requests.exceptions.RequestException as e:
             safe_msg = re.sub(r'apikey=[^&\s]+', 'apikey=***HIDDEN_KEY***', str(e))
@@ -523,7 +540,7 @@ def analyze():
             return
 
         if len(stocks) == 0:
-            yield sse_event({"type": "error", "message": "✖ Nessun dato utile pervenuto per l'analisi."})
+            yield sse_event({"type": "error", "message": "✖ Nessuna azienda ha dati di bilancio sufficienti."})
             yield sse_event({"type": "complete", "message": "Analisi interrotta."})
             return
 
@@ -549,10 +566,9 @@ def analyze():
         top10 = valid_scored[:10]
         scored.sort(key=lambda x: x[1], reverse=True)
 
-        n_filtered = len(scored) - len(valid_scored)
         yield sse_event({
             "type": "success",
-            "message": f"  ↳ {len(valid_scored)} superano i filtri ({n_filtered} scartate)."
+            "message": f"  ↳ Tutte le {len(stocks)} aziende valutate. {len(valid_scored)} superano lo score base > 0."
         })
         time.sleep(0.6)
 
@@ -635,7 +651,7 @@ def analyze():
 
         yield sse_event({
             "type": "complete",
-            "message": f"✔ Analisi completata con successo. {len(stocks)} aziende qualificate."
+            "message": f"✔ Analisi completata con successo. Salvataggio su CSV completato."
         })
 
     return Response(generate(), mimetype="text/event-stream",
