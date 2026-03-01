@@ -8,9 +8,7 @@ import logging
 from datetime import datetime, date
 
 import requests
-from flask import Flask, render_template, Response, session, request, redirect, url_for, g
-
-# ---------------------------------------------------------------------------
+from flask import Flask, render_template, Response, sessio------------------
 # Gemini (google-genai) — importazione sicura
 # ---------------------------------------------------------------------------
 try:
