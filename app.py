@@ -8,7 +8,9 @@ import logging
 from datetime import datetime, date
 
 import requests
-from flask import Flask, render_template, Response, sessio------------------
+from flask import Flask, render_template, Response, session, request, redirect, url_for, g
+
+# ---------------------------------------------------------------------------
 # Gemini (google-genai) — importazione sicura
 # ---------------------------------------------------------------------------
 try:
@@ -431,7 +433,7 @@ def analyze():
                     seen.add(sym)
                     stocks.append(s)
 
-            # --- Endpoint 3: Profili Singoli per TUTTE le aziende (ghigliottina sui dati mancanti) ---
+            # --- Endpoint 3: Profili Singoli per TUTTE le aziende ---
             yield sse_event({"type": "info", "message": "  [3/3] Fetching Fundamental Data (Tutte le aziende in lista)..."})
             time.sleep(0.3)
 
@@ -448,13 +450,13 @@ def analyze():
             # Eliminiamo fondi e ETF
             stocks = [s for s in stocks if not _is_junk(s)]
 
-            # Ordinamento logico (opzionale) ma non tagliamo la lista
+            # Ordinamento logico
             stocks.sort(
                 key=lambda s: abs(s.get("changesPercentage", 0) or 0) * (s.get("price", 0) or 0),
                 reverse=True,
             )
             
-            # Qui selezioniamo TUTTI i simboli, non solo i primi 10
+            # Selezioniamo tutti i simboli
             all_symbols = [s.get("symbol") for s in stocks if s.get("symbol")]
 
             profile_map = {}
@@ -495,38 +497,51 @@ def analyze():
             })
 
             # ------------------------------------------------------------------
-            # FILTRO TASSATIVO: Scartiamo chi non ha dati di bilancio completi
+            # FILTRO INTELLIGENTE (Ghigliottina + Piano B)
             # ------------------------------------------------------------------
-            final_stocks = []
+            profiled_stocks = []   # Tutte le aziende con almeno un profilo scaricato
+            complete_stocks = []   # Solo quelle con bilancio 100% completo (PE, EPS, Beta)
+
             for stock in stocks:
                 sym = stock.get("symbol", "")
                 if sym in profile_map:
                     prof = profile_map[sym]
                     
-                    # Dati chiave per l'analisi
                     pe = prof.get("peRatio")
                     eps = prof.get("eps")
                     beta = prof.get("beta")
 
-                    # L'azienda passa SOLO se PE, EPS e BETA esistono (non sono None)
+                    # Salviamo i dati per TUTTE, anche se sono None
+                    stock["peRatio"] = pe
+                    stock["eps"] = eps
+                    stock["lastDiv"] = prof.get("lastDiv")
+                    stock["dividendYield"] = prof.get("dividendYield")
+                    stock["beta"] = beta
+
+                    profiled_stocks.append(stock)
+
+                    # Sezione perfettini: hanno tutto?
                     if pe is not None and eps is not None and beta is not None:
-                        stock["peRatio"] = pe
-                        stock["eps"] = eps
-                        stock["lastDiv"] = prof.get("lastDiv")
-                        stock["dividendYield"] = prof.get("dividendYield")
-                        stock["beta"] = beta
-                        final_stocks.append(stock)
+                        complete_stocks.append(stock)
             
-            # Aggiorniamo la lista stocks con solo i "sopravvissuti" al filtro tassativo
-            scartati = len(stocks) - len(final_stocks)
-            stocks = final_stocks
+            # Qui si decide il destino
+            if len(complete_stocks) > 0:
+                # La ghigliottina ha risparmiato qualcuno! Usiamo solo i bilanci completi
+                scartati = len(profiled_stocks) - len(complete_stocks)
+                stocks = complete_stocks
+                yield sse_event({
+                    "type": "warning",
+                    "message": f"  ↳ GHIGLIOTTINA: {scartati} aziende eliminate perché prive di dati completi."
+                })
+            else:
+                # La ghigliottina avrebbe sterminato tutti. Usiamo il piano B
+                stocks = profiled_stocks
+                yield sse_event({
+                    "type": "warning",
+                    "message": "  ⚠ ATTENZIONE: Nessuna azienda ha un bilancio 100% completo oggi! Ghigliottina disattivata, procedo con i dati parziali..."
+                })
 
             save_api_usage(usage)
-
-            yield sse_event({
-                "type": "warning",
-                "message": f"  ↳ GHIGLIOTTINA: {scartati} aziende eliminate perché prive di dati di bilancio completi."
-            })
             time.sleep(0.5)
 
         except requests.exceptions.RequestException as e:
@@ -538,13 +553,13 @@ def analyze():
             return
 
         if len(stocks) == 0:
-            yield sse_event({"type": "error", "message": "✖ Nessuna azienda ha dati di bilancio sufficienti."})
+            yield sse_event({"type": "error", "message": "✖ Nessuna azienda trovata nell'estrazione."})
             yield sse_event({"type": "complete", "message": "Analisi interrotta."})
             return
 
         yield sse_event({
             "type": "success",
-            "message": f"  ↳ {len(stocks)} aziende verificate e pronte per lo scoring [OK]"
+            "message": f"  ↳ {len(stocks)} aziende portate alla fase di scoring [OK]"
         })
         time.sleep(0.5)
 
@@ -566,7 +581,7 @@ def analyze():
 
         yield sse_event({
             "type": "success",
-            "message": f"  ↳ Tutte le {len(stocks)} aziende valutate. {len(valid_scored)} superano lo score base > 0."
+            "message": f"  ↳ {len(valid_scored)} aziende superano lo score base > 0."
         })
         time.sleep(0.6)
 
