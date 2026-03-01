@@ -13,8 +13,9 @@
         }
     </style>
     <script>
-        // GUARD: Se già loggato (client-side), vai alla dashboard
-        if (localStorage.getItem("auth")) window.location.href = "/";
+        // Previene i loop infiniti sui dispositivi mobili: 
+        // se arrivi su questa pagina, cancelliamo la vecchia memoria locale.
+        localStorage.removeItem("auth");
     </script>
 </head>
 
@@ -143,3 +144,4 @@
 </body>
 
 </html>
+
