@@ -110,43 +110,18 @@ _TROPHY_ASSETS_WHITELIST = {
 }
 
 
-
-
 def compute_ai_score(stock: dict) -> float:
     """
     Dynamic Value‑Investing × Metodo Brera Score (0–100).
-
-    Filosofia:
-      Guido Maria Brera — Debasement, Trophy Assets, Contrarian,
-      "Prima non perdere".
-
-    Nessun Hard Block: il punteggio parte da 0 e cresce in modo fluido.
-    Le metriche mancanti semplicemente non contribuiscono.
-
-    Componenti:
-      • Trophy Asset bonus      → +60 pt
-      • P/E ratio (10–25)       → fino a +25 pt
-      • EPS > 0                 → fino a +15 pt
-      • Momentum (curva)        → da -20 a +20 pt
-      • Beta (stabilità)        → da -10 a +10 pt
-      • Dividendi               → fino a +10 pt
     """
-
     symbol = str(stock.get("symbol") or "").strip().upper()
-
     score = 0.0
 
-    # ================================================================
     # TROPHY ASSET BONUS (+60)
-    # ================================================================
     if symbol in _TROPHY_ASSETS_WHITELIST:
         score += 60.0
 
-    # ================================================================
-    # METRICHE FONDAMENTALI (solo se presenti)
-    # ================================================================
-
-    # --- P/E component (max +25 pt) ---
+    # METRICHE FONDAMENTALI
     pe_raw = stock.get("peRatio")
     try:
         pe = float(pe_raw)
@@ -154,17 +129,12 @@ def compute_ai_score(stock: dict) -> float:
         pe = None
 
     if pe is not None and 0 < pe <= 25:
-        # Sweet‑spot 10–25 → punteggio pieno proporzionale
         if pe >= 10:
-            # Perfetto a 17, scala lineare verso i bordi
             distance = abs(pe - 17.0)
             score += max(15.0, 25.0 - distance * 1.0)
         else:
-            # P/E < 10: potenzialmente deep‑value, ma meno affidabile
             score += max(5.0, 15.0 - (10.0 - pe) * 1.5)
-    # pe > 25 o assente: 0 punti, nessuna penalizzazione
 
-    # --- EPS component (max +15 pt) ---
     eps_raw = stock.get("eps")
     try:
         eps = float(eps_raw)
@@ -175,11 +145,7 @@ def compute_ai_score(stock: dict) -> float:
         eps_pts = math.log1p(eps) * 5.0
         score += min(15.0, eps_pts)
 
-    # ================================================================
-    # METRICHE DI MERCATO (per tutti)
-    # ================================================================
-
-    # --- Momentum component (da -20 a +20 pt) ---
+    # METRICHE DI MERCATO
     change_pct_raw = stock.get("changesPercentage") or 0
     try:
         change_pct = float(change_pct_raw)
@@ -187,26 +153,18 @@ def compute_ai_score(stock: dict) -> float:
         change_pct = 0.0
 
     if change_pct < -3.0:
-        # Ribasso pesante → penalizza (fino a -20 per crolli)
         score += max(-20.0, change_pct * 2.0)
     elif -3.0 <= change_pct < 0.0:
-        # Leggero ribasso → neutro / lieve negativo
         score += change_pct * 1.0
     elif 0.0 <= change_pct <= 2.0:
-        # Crescita modesta → lieve bonus
         score += change_pct * 3.0
     elif 2.0 < change_pct <= 8.0:
-        # Crescita sana → bonus pieno (picco a ~8%)
         score += 6.0 + (change_pct - 2.0) * 2.3333
-        score = score  # max ≈ 20 pt a 8%
     elif 8.0 < change_pct <= 15.0:
-        # Crescita alta → bonus che decresce
         score += max(5.0, 20.0 - (change_pct - 8.0) * 2.14)
     else:
-        # Balzo speculativo > +15% → penalizza
         score -= min(20.0, (change_pct - 15.0) * 3.0)
 
-    # --- Beta component (da -10 a +10 pt) ---
     beta_raw = stock.get("beta")
     try:
         beta = float(beta_raw)
@@ -217,15 +175,14 @@ def compute_ai_score(stock: dict) -> float:
         if 0.5 <= beta <= 1.2:
             score += 10.0
         elif beta < 0.5:
-            score += 5.0  # ultra-difensivo, piccolo bonus
+            score += 5.0
         elif 1.2 < beta <= 1.5:
-            score += 3.0  # neutro-lieve
+            score += 3.0
         elif 1.5 < beta <= 1.8:
-            score -= 3.0  # volatile
-        else:  # beta > 1.8
-            score -= 10.0  # istericamente volatile
+            score -= 3.0
+        else:
+            score -= 10.0
 
-    # --- Dividendi component (max +10 pt) ---
     div_yield = stock.get("dividendYield")
     if div_yield is None:
         last_div = stock.get("lastDiv")
@@ -244,9 +201,8 @@ def compute_ai_score(stock: dict) -> float:
 
     if div_yield > 0:
         if div_yield <= 5.0:
-            score += div_yield * 2.0  # max 10 pt a 5%
+            score += div_yield * 2.0
         else:
-            # Yield eccessivo → cap a 10, leggero declino
             score += max(6.0, 10.0 - (div_yield - 5.0) * 0.5)
 
     return round(max(0.0, min(100.0, score)), 1)
@@ -292,12 +248,7 @@ def save_results_csv(stocks: list[dict], scores: list[float]) -> str:
 # Gemini AI Commentary
 # ---------------------------------------------------------------------------
 def generate_gemini_comment(stock: dict, score: float):
-    """
-    Genera un commento in stile Guido Maria Brera usando Gemini.
-    Analizza il titolo attraverso i filtri del debasement monetario,
-    trophy assets, approccio contrarian e protezione del capitale.
-    Ritorna il testo, un messaggio di errore leggibile, oppure None.
-    """
+    """Genera un commento in stile Guido Maria Brera usando Gemini."""
     if not GEMINI_AVAILABLE:
         logger.error("Gemini SDK non installato (google-genai mancante).")
         return None
@@ -338,7 +289,6 @@ def generate_gemini_comment(stock: dict, score: float):
             f"Rispondi in italiano, tono sofisticato e deciso, come nelle tue interviste."
         )
 
-        # Retry logic for 429/Resource Exhausted
         for attempt in range(3):
             try:
                 response = client.models.generate_content(
@@ -350,7 +300,7 @@ def generate_gemini_comment(stock: dict, score: float):
                 err_str = str(e)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                     if attempt < 2:
-                        time.sleep(2 * (attempt + 1))  # backoff: 2s, 4s
+                        time.sleep(2 * (attempt + 1))
                         continue
                     logger.error("Gemini Quota Esaurita dopo 3 tentativi: %s", e)
                     return "⚠ [Quota AI Esaurita] — Riprova più tardi."
@@ -366,15 +316,11 @@ def generate_gemini_comment(stock: dict, score: float):
 # ---------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    # Se già loggato (server-side), vai alla dashboard
-    # Bypass se ?force=1 (per recupero loop redirect client-side)
     if session.get("logged_in") and not request.args.get("force"):
         return redirect(url_for("index"))
 
     error = None
     if request.method == "POST":
-        # Supporta sia form-data che JSON
-        # Rileva se il client vuole JSON (AJAX fetch)
         accept_header = request.headers.get("Accept", "")
         content_type = request.headers.get("Content-Type", "")
         wants_json = request.is_json or "json" in accept_header or "json" in content_type
@@ -387,11 +333,10 @@ def login():
             else:
                 pin = str(request.form.get("pin", "")).strip()
         except:
-            pin = "" # Fallback on error
+            pin = ""
 
         if pin == APP_PIN.strip():
             session["logged_in"] = True
-            # Se è JSON (dal frontend JS) o richiesto, ritorna JSON
             if wants_json:
                 return {"success": True}
             return redirect(url_for("index"))
@@ -430,7 +375,7 @@ def analyze():
         def denied():
             yield sse_event({"type": "error", "message": "⛔ Accesso negato. Effettua il login."})
         return Response(denied(), mimetype="text/event-stream")
-    import requests  # import locale per non bloccare l'avvio se manca
+    import requests
 
     def generate():
         logger.info("=== Nuova analisi avviata ===")
@@ -458,13 +403,12 @@ def analyze():
         yield sse_event({"type": "success", "message": "  ↳ Connection established (12ms)"})
         time.sleep(0.3)
 
-        # --- Step 3: Chiamata API FMP (3 endpoint free-tier) ---
+        # --- Step 3: Chiamata API FMP ---
         yield sse_event({"type": "info", "message": "> Scaricamento dati di mercato (NASDAQ, NYSE)..."})
         time.sleep(0.4)
 
-        # Verifica che bastino almeno 3 chiamate
-        if remaining < 3:
-            yield sse_event({"type": "error", "message": "✖ ERRORE: Limite API raggiunto. Riprova più tardi."})
+        if remaining < 12: # Assicuriamoci di avere margine per actives + gainers + 10 profili
+            yield sse_event({"type": "error", "message": "✖ ERRORE: Limite API insufficiente. Riprova più tardi."})
             yield sse_event({"type": "complete", "message": "Analisi interrotta."})
             return
 
@@ -477,7 +421,6 @@ def analyze():
             resp1.raise_for_status()
             data1 = resp1.json()
             usage["count"] += 1
-            logger.info("most-actives OK (%d risultati)", len(data1) if isinstance(data1, list) else 0)
             time.sleep(0.3)
 
             # --- Endpoint 2: Biggest Gainers ---
@@ -486,9 +429,8 @@ def analyze():
             resp2.raise_for_status()
             data2 = resp2.json()
             usage["count"] += 1
-            logger.info("biggest-gainers OK (%d risultati)", len(data2) if isinstance(data2, list) else 0)
 
-            # Unisci e deduplica per symbol
+            # Unisci e deduplica
             seen = set()
             for s in (data1 if isinstance(data1, list) else []) + (data2 if isinstance(data2, list) else []):
                 sym = s.get("symbol")
@@ -496,11 +438,10 @@ def analyze():
                     seen.add(sym)
                     stocks.append(s)
 
-            # --- Endpoint 3: Profili (fondamentali) ---
-            yield sse_event({"type": "info", "message": "  [3/3] Fetching Fundamental Data (P/E, EPS, Dividends)..."})
+            # --- Endpoint 3: Profili Singoli ---
+            yield sse_event({"type": "info", "message": "  [3/3] Fetching Fundamental Data (Singole Chiamate)..."})
             time.sleep(0.3)
 
-            # Pre-filter: rimuovi spazzatura (ETF/fondi/leva) MA preserva Trophy Assets
             def _is_junk(s):
                 sym = str(s.get("symbol") or "").strip().upper()
                 if sym in _TROPHY_ASSETS_WHITELIST:
@@ -513,45 +454,51 @@ def analyze():
 
             stocks = [s for s in stocks if not _is_junk(s)]
 
-            # Pre-sort by raw momentum to pick only top 20 candidates
+            # Seleziona SOLO i TOP 10 per risparmiare API calls
             stocks.sort(
                 key=lambda s: abs(s.get("changesPercentage", 0) or 0) * (s.get("price", 0) or 0),
                 reverse=True,
             )
-            top_symbols = [s.get("symbol") for s in stocks[:20] if s.get("symbol")]
+            top_symbols = [s.get("symbol") for s in stocks[:10] if s.get("symbol")]
 
             profile_map = {}
             profile_api_calls = 0
-            if top_symbols and usage["count"] < API_DAILY_LIMIT:
-                symbols_str = ",".join(top_symbols)
+
+            if top_symbols:
+                yield sse_event({"type": "info", "message": f"  ↳ Inizio fetch individuale per {len(top_symbols)} asset..."})
+
+            for sym in top_symbols:
+                if (usage["count"] + profile_api_calls) >= API_DAILY_LIMIT:
+                    yield sse_event({"type": "warning", "message": "⚠ Limite API raggiunto durante lo scaricamento dei profili."})
+                    break
+                
                 try:
                     resp3 = requests.get(
                         FMP_PROFILE_URL,
-                        params={"symbol": symbols_str, "apikey": FMP_API_KEY},
+                        params={"symbol": sym, "apikey": FMP_API_KEY},
                         timeout=15,
                     )
                     resp3.raise_for_status()
                     prof_data = resp3.json()
                     profile_api_calls += 1
-                    # La risposta può essere una lista o un singolo dict
-                    if isinstance(prof_data, list):
-                        for p in prof_data:
-                            s = p.get("symbol")
-                            if s:
-                                profile_map[s] = p
+
+                    if isinstance(prof_data, list) and len(prof_data) > 0:
+                        profile_map[sym] = prof_data[0]
                     elif isinstance(prof_data, dict) and prof_data.get("symbol"):
-                        profile_map[prof_data["symbol"]] = prof_data
+                        profile_map[sym] = prof_data
                 except Exception as e:
-                    profile_api_calls += 1  # conta anche il tentativo fallito
-                    logger.error("Errore batch profiles: %s", e)
+                    profile_api_calls += 1
+                    logger.error("Errore fetch profilo per %s: %s", sym, e)
+
             usage["count"] += profile_api_calls
 
             yield sse_event({
                 "type": "info",
-                "message": f"  ↳ Profili scaricati: {len(profile_map)}/{len(top_symbols)} ({profile_api_calls} API call)"
+                "message": f"  ↳ Profili integrati: {len(profile_map)}/{len(top_symbols)} ({profile_api_calls} API call usate)"
             })
 
-            # Arricchisci stocks con fondamentali
+            # Arricchisci stocks coi fondamentali (eliminiamo chi non ha profilo)
+            final_stocks = []
             for stock in stocks:
                 sym = stock.get("symbol", "")
                 if sym in profile_map:
@@ -561,91 +508,65 @@ def analyze():
                     stock["lastDiv"] = prof.get("lastDiv")
                     stock["dividendYield"] = prof.get("dividendYield")
                     stock["beta"] = prof.get("beta")
+                    final_stocks.append(stock)
+            
+            stocks = final_stocks
 
-            logger.info("profiles OK (%d profili, %d API calls)", len(profile_map), profile_api_calls)
-
-            # Salva contatore aggiornato
             save_api_usage(usage)
-            logger.info("Contatore API aggiornato: %d/%d", usage["count"], API_DAILY_LIMIT)
 
         except requests.exceptions.RequestException as e:
             safe_msg = re.sub(r'apikey=[^&\s]+', 'apikey=***HIDDEN_KEY***', str(e))
             msg = f"✖ ERRORE: {safe_msg}"
             yield sse_event({"type": "error", "message": msg})
-            logger.error("Errore API: %s", e)  # log completo (server-side only)
-            save_api_usage(usage)  # salva comunque il contatore
+            save_api_usage(usage)
             yield sse_event({"type": "complete", "message": "Analisi interrotta per errore di rete."})
             return
 
         if len(stocks) == 0:
-            yield sse_event({"type": "error", "message": "✖ Nessun dato ricevuto dall'API."})
-            logger.warning("API ha restituito dati vuoti o non validi.")
+            yield sse_event({"type": "error", "message": "✖ Nessun dato utile pervenuto per l'analisi."})
             yield sse_event({"type": "complete", "message": "Analisi interrotta."})
             return
 
         yield sse_event({
             "type": "success",
-            "message": f"  ↳ {len(stocks):,} aziende uniche scaricate + fondamentali [OK]"
+            "message": f"  ↳ {len(stocks)} aziende verificate e pronte per lo scoring [OK]"
         })
         time.sleep(0.5)
 
-        # --- Step 4: Calcolo AI Score (Value Investing) ---
+        # --- Step 4: Calcolo AI Score ---
         yield sse_event({"type": "info", "message": "> Analisi fondamentale in corso..."})
         time.sleep(0.3)
         yield sse_event({"type": "info", "message": "  Calculating AI Score (P/E × EPS × Momentum × Dividends)..."})
         time.sleep(0.4)
-        yield sse_event({"type": "info", "message": "  Applying Value Investing filters..."})
-        time.sleep(0.5)
 
         scored = []
         for stock in stocks:
             score = compute_ai_score(stock)
             scored.append((stock, score))
 
-        # Filtra: rimuovi tutte le azioni con score == 0.0
         valid_scored = [(s, sc) for s, sc in scored if sc > 0.0]
         valid_scored.sort(key=lambda x: x[1], reverse=True)
         top10 = valid_scored[:10]
-
-        # Ordina anche il totale per il CSV (include anche i 0.0)
         scored.sort(key=lambda x: x[1], reverse=True)
 
         n_filtered = len(scored) - len(valid_scored)
         yield sse_event({
             "type": "success",
-            "message": (
-                f"  ↳ {len(stocks)} aziende analizzate. "
-                f"{len(valid_scored)} superano i filtri ({n_filtered} scartate)."
-            )
+            "message": f"  ↳ {len(valid_scored)} superano i filtri ({n_filtered} scartate)."
         })
         time.sleep(0.6)
 
-        # --- Early exit se nessuna azienda supera i filtri ---
         if len(top10) == 0:
-            yield sse_event({
-                "type": "warning",
-                "message": "⚠ Nessuna azienda ha superato i filtri Value Investing oggi."
-            })
-            time.sleep(0.3)
-            yield sse_event({
-                "type": "info",
-                "message": "  ↳ Tutti gli asset analizzati sono ETF, fondi, in perdita o senza fondamentali."
-            })
-
-            # Salva CSV comunque (silenzioso)
+            yield sse_event({"type": "warning", "message": "⚠ Nessuna azienda ha superato i filtri Value Investing oggi."})
+            
             all_stocks_for_csv = [s for s, _ in scored]
             all_scores_for_csv = [sc for _, sc in scored]
             save_results_csv(all_stocks_for_csv, all_scores_for_csv)
 
-            yield sse_event({
-                "type": "complete",
-                "message": "✔ Analisi completata — nessun candidato Value Investing trovato."
-            })
-            logger.info("=== Analisi completata (0 candidati validi) ===")
+            yield sse_event({"type": "complete", "message": "✔ Analisi completata — nessun candidato trovato."})
             return
 
         # --- Step 5: Output Top 10 ---
-        yield sse_event({"type": "info", "message": ""})
         yield sse_event({"type": "info", "message": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"})
         yield sse_event({"type": "success", "message": "  🏆  TOP 10 — AI Investment Ranking"})
         yield sse_event({"type": "info", "message": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"})
@@ -662,7 +583,6 @@ def analyze():
             pe = stock.get("peRatio", "N/A")
             eps_val = stock.get("eps", "N/A")
 
-            # Freccia su/giù in base al segno
             arrow = "↑" if change_pct >= 0 else "↓"
 
             yield sse_event({
@@ -677,14 +597,10 @@ def analyze():
             time.sleep(0.35)
 
         yield sse_event({"type": "info", "message": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"})
-        yield sse_event({"href": "#", "title": "View Chart", "type": "link"})
         time.sleep(0.3)
 
-        # --- Step 5b: Invio dati per il grafico ---
-        chart_data = [
-            {"symbol": s.get("symbol", "?"), "ai_score": sc}
-            for s, sc in top10
-        ]
+        # Chart Data
+        chart_data = [{"symbol": s.get("symbol", "?"), "ai_score": sc} for s, sc in top10]
         if len(chart_data) > 0:
             yield sse_event({"type": "chart_data", "payload": chart_data})
 
@@ -697,54 +613,34 @@ def analyze():
             gemini_text = generate_gemini_comment(winner_stock, winner_score)
 
             if gemini_text:
-                yield sse_event({
-                    "type": "info",
-                    "message": "  ↳ Gemini 2.0 Flash connesso [OK]"
-                })
+                yield sse_event({"type": "info", "message": "  ↳ Gemini 2.5 Flash connesso [OK]"})
                 time.sleep(0.3)
-                yield sse_event({
-                    "type": "info",
-                    "message": f"  📝 Commento AI su {winner_stock.get('symbol', '???')}:"
-                })
+                yield sse_event({"type": "info", "message": f"  📝 Commento AI su {winner_stock.get('symbol', '???')}:"})
                 time.sleep(0.3)
 
-                # Effetto macchina da scrivere — invia a blocchi di ~8 caratteri
                 chunk_size = 8
                 for i in range(0, len(gemini_text), chunk_size):
                     chunk = gemini_text[i:i + chunk_size]
                     yield sse_event({"type": "gemini", "message": chunk})
                     time.sleep(0.04)
 
-                # Segnale di fine typewriter
                 yield sse_event({"type": "gemini_end", "message": ""})
                 time.sleep(0.3)
             else:
-                yield sse_event({
-                    "type": "warning",
-                    "message": "  ⚠ [Modulo LLM Disconnesso] — Commento AI non disponibile."
-                })
+                yield sse_event({"type": "warning", "message": "  ⚠ [Modulo LLM Disconnesso] — Commento AI non disponibile."})
                 time.sleep(0.3)
 
-        # --- Step 7: Salvataggio CSV (silenzioso) ---
+        # --- Step 7: Salvataggio CSV ---
         save_results_csv(all_stocks_for_csv, all_scores_for_csv)
 
-        # --- Done ---
         yield sse_event({
             "type": "complete",
-            "message": f"✔ Analisi completata con successo. {len(stocks)} aziende analizzate."
+            "message": f"✔ Analisi completata con successo. {len(stocks)} aziende qualificate."
         })
-        logger.info("=== Analisi completata ===")
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    # Flask Cors è disabilitato se rimosso, altrimenti gestire con CORS(app).
-    # Qui manteniamo la versione pulita come da richiesta utente.
-    logger.info("Server Flask avviato su porta %d.", port)
     app.run(host="0.0.0.0", port=port)
